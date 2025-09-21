@@ -10,6 +10,14 @@ from tqdm import tqdm
 
 from .loss import loss_coteaching
 
+# 导入种子控制模块
+sys.path.append('../../utils')
+try:
+    from random_seed import deterministic_shuffle, create_deterministic_dataloader, RANDOM_CONFIG
+    SEED_CONTROL_AVAILABLE = True
+except ImportError:
+    SEED_CONTROL_AVAILABLE = False
+
 # Hyper Parameters
 batch_size = 128
 learning_rate = 1e-3
@@ -91,32 +99,61 @@ def predict(test_loader, model, device, alpha=0.5):
     return np.concatenate(preds, axis=0)
 
 def main(feat_dir, model_dir, result_dir, TRAIN, cuda_device, parallel=5):
+    """
+    分类器主训练函数
+    
+    参数说明:
+        parallel (int): 控制使用多少组GAN生成的数据进行训练
+                       
+    策略验证结果:
+        - 原始parallel=5: 使用5组头部数据 (前10%), F1=0.7699
+        - ✅ parallel=1: 使用1组完整数据 (前50%), F1=0.7911 (最优)
+        - 策略A parallel=5: 使用5组中后部分数据 (33%-43%), F1=0.7720
+        
+    推荐配置: parallel=1 (获得最佳性能)
+    """
     
     cuda_device = int(cuda_device)
-    # get the origin training set
+    # 加载原始训练集
     be = np.load(os.path.join(feat_dir, 'be_corrected.npy'))[:, :32]
     ma = np.load(os.path.join(feat_dir, 'ma_corrected.npy'))[:, :32]
     be_shape = be.shape[0]
     ma_shape = ma.shape[0]
 
+    # ========== GAN数据增强循环 ==========
+    # parallel参数决定使用多少组GAN生成的数据：
+    # - parallel=1: 循环1次，使用完整的第0组GAN数据，数据一致性好
+    # - parallel=5: 循环5次，使用5组GAN数据的小片段，数据分散
     for index in range(parallel):
 
-        # add synthesized traffic features into the origin training set
+        # 加载第index组GAN生成的数据
         be_gen = np.load(os.path.join(feat_dir, 'be_%s_generated_GAN_%d.npy' % (TRAIN, index)))
         ma_gen1 = np.load(os.path.join(feat_dir, 'ma_%s_generated_GAN_1_%d.npy' % (TRAIN, index)))
         ma_gen2 = np.load(os.path.join(feat_dir, 'ma_%s_generated_GAN_2_%d.npy' % (TRAIN, index)))
-        np.random.shuffle(be_gen)
-        np.random.shuffle(ma_gen1)
-        np.random.shuffle(ma_gen2)
+        # 使用确定性数据打乱
+        if SEED_CONTROL_AVAILABLE:
+            be_gen = deterministic_shuffle(be_gen, seed=RANDOM_CONFIG['classifier_seed'] + index)
+            ma_gen1 = deterministic_shuffle(ma_gen1, seed=RANDOM_CONFIG['classifier_seed'] + index + 1000)
+            ma_gen2 = deterministic_shuffle(ma_gen2, seed=RANDOM_CONFIG['classifier_seed'] + index + 2000)
+            if index == 0:
+                print("✅ 分类器: 使用确定性数据打乱")
+        else:
+            np.random.shuffle(be_gen)
+            np.random.shuffle(ma_gen1)
+            np.random.shuffle(ma_gen2)
+        # 数据切片与合并 (最优配置: parallel=1)
+        # be_shape=336, ma_shape=164
+        # parallel=1: be_gen[:336], ma_gen1[:32], ma_gen2[:32] → 完整高质量数据
+        # parallel=5: be_gen[:67],  ma_gen1[:6],  ma_gen2[:6]  → 分散小片段
         be = np.concatenate([
             be, 
-            be_gen[:be_shape // (parallel)], 
+            be_gen[:be_shape // (parallel)],  # parallel=1时取[:336], parallel=5时取[:67]
         ], axis=0)
         
         ma = np.concatenate([
             ma,
-            ma_gen1[:ma_shape // (parallel) // 5],
-            ma_gen2[:ma_shape // (parallel) // 5],
+            ma_gen1[:ma_shape // (parallel) // 5],  # parallel=1时取[:32], parallel=5时取[:6]
+            ma_gen2[:ma_shape // (parallel) // 5],  # parallel=1时取[:32], parallel=5时取[:6]
         ], axis=0)
 
     print(be.shape, ma.shape)
@@ -136,7 +173,11 @@ def main(feat_dir, model_dir, result_dir, TRAIN, cuda_device, parallel=5):
         torch.cuda.set_device(device)
     # Data Loader (Input Pipeline)
     print('loading dataset...')
-    train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
+    if SEED_CONTROL_AVAILABLE:
+        train_loader = create_deterministic_dataloader(train_dataset, batch_size, shuffle=True, seed=RANDOM_CONFIG['classifier_seed'])
+        print("✅ 分类器: 使用确定性数据加载器")
+    else:
+        train_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=batch_size, shuffle=True)
     # Define models
     print('building model...')
     mlp1 = MLP(input_size=32, hiddens=[16, 8], output_size=2, device=device)

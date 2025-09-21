@@ -9,6 +9,14 @@ import os
 from sklearn.datasets import make_blobs
 import math
 
+# 导入种子控制模块
+sys.path.append('../../utils')
+try:
+    from random_seed import RANDOM_CONFIG, get_deterministic_random_int
+    SEED_CONTROL_AVAILABLE = True
+except ImportError:
+    SEED_CONTROL_AVAILABLE = False
+
 # synthesize 3 types of samples.
 def main(feat_dir, model_dir, TRAIN, index, cuda_device):
 
@@ -55,9 +63,21 @@ def main(feat_dir, model_dir, TRAIN, index, cuda_device):
         
         return np.array(gen_data)
 
-    gen_data_be = generate(train_type_be, BeGenModel, int(be.shape[0]) * 2, np.random.randint(1000))
-    gen_data_ma1 = generate(train_type_ma, MaGenModel_1, int(ma.shape[0]) * 2, np.random.randint(1000))
-    gen_data_ma2 = generate(train_type_ma, MaGenModel_2, int(ma.shape[0]) * 2, np.random.randint(1000))
+    # 使用确定性随机种子
+    if SEED_CONTROL_AVAILABLE:
+        be_seed = get_deterministic_random_int(0, 1000, seed=RANDOM_CONFIG['generation_seed'] + index)
+        ma1_seed = get_deterministic_random_int(0, 1000, seed=RANDOM_CONFIG['generation_seed'] + index + 1000)
+        ma2_seed = get_deterministic_random_int(0, 1000, seed=RANDOM_CONFIG['generation_seed'] + index + 2000)
+        print(f"✅ 生成器: 使用确定性种子 be={be_seed}, ma1={ma1_seed}, ma2={ma2_seed}")
+    else:
+        be_seed = np.random.randint(1000)
+        ma1_seed = np.random.randint(1000)
+        ma2_seed = np.random.randint(1000)
+        print("⚠️  生成器: 使用非确定性种子")
+    
+    gen_data_be = generate(train_type_be, BeGenModel, int(be.shape[0]) * 2, be_seed)
+    gen_data_ma1 = generate(train_type_ma, MaGenModel_1, int(ma.shape[0]) * 2, ma1_seed)
+    gen_data_ma2 = generate(train_type_ma, MaGenModel_2, int(ma.shape[0]) * 2, ma2_seed)
 
     np.save(os.path.join(feat_dir, 'be_%s_generated_GAN_%d.npy'%(TRAIN, index)), gen_data_be)
     np.save(os.path.join(feat_dir, 'ma_%s_generated_GAN_1_%d.npy'%(TRAIN, index)), gen_data_ma1)
